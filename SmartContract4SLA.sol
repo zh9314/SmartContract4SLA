@@ -44,6 +44,12 @@ contract CloudSLA {
     }
     mapping(address => Witness) witProve;
     
+    ////this is to log event that _who modified the SLA state to _newstate at time stamp _time
+    event SLAStateModified(address indexed _who, uint _time, State _newstate);
+    
+    ////this is to log event that _witness report a violation at time stamp _time for a SLA monitoring round of _roundID
+    event SLAViolationRep(address indexed _witness, uint _time, uint _roundID);
+    
     
     function constuctor()
         public
@@ -129,6 +135,7 @@ contract CloudSLA {
         ProviderBalance = msg.value;
         SLAState = State.Init;
         AcceptTimeEnd = now + AcceptTimeWin;
+        emit SLAStateModified(msg.sender, now, State.Init);
     }
     
     function cancleSLA()
@@ -154,6 +161,7 @@ contract CloudSLA {
     {
         ClientBalance = msg.value;
         SLAState = State.Active;
+        emit SLAStateModified(msg.sender, now, State.Active);
         ServiceEnd = now + ServiceDuration;
         
         ///transfer ServiceFee from client to provider 
@@ -192,10 +200,16 @@ contract CloudSLA {
         
         ConfirmRepCount += 1;
         
-        if(ConfirmRepCount >= ValidNumber)
+        if(ConfirmRepCount >= ValidNumber){
             SLAState = State.Violated;
-        else
+            emit SLAStateModified(msg.sender, now, State.Violated);
+        }
+        else{
             equalOp = now;
+            equalOp = now;
+        }
+        
+        emit SLAViolationRep(msg.sender, now, ServiceEnd);
     }
     
     //// the client end the violated SLA and withdraw its compensation
@@ -224,6 +238,7 @@ contract CloudSLA {
         SharedBalance = 0;
         
         SLAState = State.Completed;
+        emit SLAStateModified(msg.sender, now, State.Completed);
         
         if(ClientBalance > 0)
             msg.sender.transfer(ClientBalance);
@@ -281,6 +296,7 @@ contract CloudSLA {
         SharedBalance = 0;
         
         SLAState = State.Completed;
+        emit SLAStateModified(msg.sender, now, State.Completed);
         
         if(ProviderBalance > 0)
             msg.sender.transfer(ProviderBalance);
@@ -319,6 +335,7 @@ contract CloudSLA {
         }
         
         SLAState = State.Fresh;
+        emit SLAStateModified(msg.sender, now, State.Fresh);
     }
     
     
