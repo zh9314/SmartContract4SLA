@@ -140,13 +140,14 @@ contract CloudSLA {
     
     function cancleSLA()
         public
-        checkState(State.Fresh)
+        checkState(State.Init)
         checkProvider
         checkTimeOut(AcceptTimeEnd)
     {
         if(ProviderBalance > 0)
             msg.sender.transfer(ProviderBalance);
         
+        SLAState = State.Fresh;
         ProviderBalance = 0;
     }
     
@@ -340,12 +341,20 @@ contract CloudSLA {
     
     
     //// this is only for debug in case there is some money stuck in the contract
-    function only4Debug()
+    function only4DebugWithdraw()
         public
         checkProvider
     {
         if(address(this).balance > 0)
             msg.sender.transfer(address(this).balance);
+    }
+    
+    
+    function only4DebugChangeState(State _newstate)
+        public
+        checkProvider
+    {
+        SLAState = _newstate;
     }
     
 }
