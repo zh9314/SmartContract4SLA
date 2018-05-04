@@ -330,6 +330,7 @@ contract CloudSLA {
         
         /// reset all the related values
         ConfirmRepCount = 0;
+        ConfirmTimeBegin = 0;
         for(uint i = 0 ; i < witnesses.length ; i++){
             witProve[witnesses[i]].violated = false;
             witProve[witnesses[i]].balance = 0;
