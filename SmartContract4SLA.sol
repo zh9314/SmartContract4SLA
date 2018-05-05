@@ -51,7 +51,7 @@ contract CloudSLA {
     event SLAViolationRep(address indexed _witness, uint _time, uint _roundID);
     
     
-    function constuctor()
+    function CloudSLA()
         public
     {
         Provider = msg.sender;
