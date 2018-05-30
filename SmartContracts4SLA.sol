@@ -127,11 +127,14 @@ contract WitnessPool {
         returns
         (bool success)
     {
+        ////make sure the request is invoked before this interface
+        require(SLAContractPool[msg.sender].curBlockNum != 0);
         //// there should be more than 10 times of _N online witnesses
-        require(onlineCounter > _N);   ///this is debug mode
+        require(onlineCounter >= _N+2);   ///this is debug mode
         //require(onlineCounter > 10*_N);
         
-        
+        ////currently, the hash value can only be accessed within 255 depth. In this case, invoke 'request' again
+        require( block.number < SLAContractPool[msg.sender].curBlockNum + 255);
         //// there should be more than extra 2*blkNeed blocks generated  
         require( block.number > SLAContractPool[msg.sender].curBlockNum + 2*SLAContractPool[msg.sender].blkNeed );
         uint seed = 0;
@@ -155,6 +158,9 @@ contract WitnessPool {
             
             seed = (uint)(keccak256(uint(seed)));
         }
+        
+        ///make this interface cannot be invoked twice without 'request'
+        SLAContractPool[msg.sender].curBlockNum = 0;
         return true;
     }
     
@@ -185,7 +191,8 @@ contract WitnessPool {
     
     /**
      * Contract Interface::
-     * SLA contract ends and witness calls this from the contract to release the Busy witness. 
+     * SLA contract ends and witness calls this from the contract to release the Busy witness.
+     * If the reputation smaller than 0, the witness will be turned off.
      * */
     function release(address _witness)
         public
@@ -198,8 +205,31 @@ contract WitnessPool {
         ////only the SLA contract can operate on it.
         require(witnessPool[_witness].SLAContract == msg.sender);
         
-        witnessPool[_witness].state = WState.Online;
-        onlineCounter++;
+        if(witnessPool[_witness].reputation <= 0){
+            witnessPool[_witness].state = WState.Offline;
+        }else{
+            witnessPool[_witness].state = WState.Online;
+            onlineCounter++;
+        }
+        
+    }
+    
+    /**
+     * Contract Interface::
+     * Decrease the reputation value. 
+     * */
+    function reputationDecrease(address _witness, int8 _value)
+        public
+        checkWitness(_witness)
+        checkSLAContract(msg.sender)
+    {
+        ////only able to release in Busy state
+        require( _value > 0 );
+        
+        ////only the SLA contract can operate on it.
+        require(witnessPool[_witness].SLAContract == msg.sender);
+        
+        witnessPool[_witness].reputation -= _value;
         
     }
     
@@ -237,23 +267,29 @@ contract WitnessPool {
         ////able to turn only in candidate state
         require(witnessPool[msg.sender].state == WState.Candidate);
         
-        witnessPool[msg.sender].state = WState.Online;
-        onlineCounter++;
-        
         witnessPool[msg.sender].reputation -= 10;
+        
+        if(witnessPool[msg.sender].reputation <= 0){
+            witnessPool[msg.sender].state = WState.Offline;
+        }else{
+            witnessPool[msg.sender].state = WState.Online;
+            onlineCounter++;
+        }
     }
     
     /**
      * Witness Interface::
-     * Turn online to wait for sortition.
+     * Turn online to wait for sortition. The witness with reputation samller than 0 cannot be turned on.
      * */
     function turnOn()
         public
         checkWitness(msg.sender)
     {
-        
         ////must be in the state of offline
         require(witnessPool[msg.sender].state == WState.Offline);
+        
+        ///its reputation must be bigger than 0
+        require( witnessPool[msg.sender].reputation > 0 );
         
         witnessPool[msg.sender].state = WState.Online;
         onlineCounter++;
@@ -278,15 +314,16 @@ contract WitnessPool {
     
     /**
      * Witness Interface::
-     * For witness itself to check the state of itself.
+     * For witness itself to check the state of itself and the reputation.
+     * If it is selected, following two return values show its confirmation deadline and the address of the SLA contract, who sortited it. 
      * */
     function checkWState(address _witness)
         public
         view
         returns
-        (WitnessPool.WState, uint)
+        (WitnessPool.WState, int8, uint, address)
     {
-        return (witnessPool[_witness].state, witnessPool[_witness].confirmDeadline);
+        return (witnessPool[_witness].state, witnessPool[_witness].reputation, witnessPool[_witness].confirmDeadline, witnessPool[_witness].SLAContract);
     }
     
 }
@@ -306,18 +343,18 @@ contract CloudSLA {
     uint public CompensationFee = 500 finney; ///0.5 ether
     uint public ServiceFee = 1 ether;
     uint public ServiceDuration = 10 minutes;  
-    uint ServiceEnd = 0;
+    uint public ServiceEnd = 0;
     
     uint public WF4NoViolation = 10 finney;  ///the fee for the witness if there is no violation
     uint WF4Violation = 10*WF4NoViolation;   ///the fee for the witness in case there is violation
     uint VoteFee = WF4NoViolation;   ///this is the fee for witness to report its violation
     
     uint public WitnessNumber = 3;   ///N
-    uint public ConfirmNumber = 2;   ////M: This is a number to indicate how many witnesses needed to confirm the violation
+    uint public ConfirmNumRequired = 2;   ////M: This is a number to indicate how many witnesses needed to confirm the violation
     
     uint SharedFee = (WitnessNumber * WF4Violation)/2;  ////this is the maximum shared fee to pay the witnesses
-    uint ConfirmTimeWin = 2 minutes;   ////the time window for waiting all the witnesses to confirm a violation event 
-    uint ConfirmTimeBegin = 0;
+    uint ReportTimeWin = 2 minutes;   ////the time window for waiting all the witnesses to report a violation event 
+    uint ReportTimeBegin = 0;
     uint ConfirmRepCount = 0;
     
     uint AcceptTimeWin = 2 minutes;   ///the time window for waiting the customer to accept this SLA, otherwise the state of SLA is transferred to Completed
@@ -404,15 +441,8 @@ contract CloudSLA {
     modifier checkAllBalance(){
         require(CustomerBalance == 0);
         
-        bool withdrawnAll = true;
-        for(uint i = 0 ; i < witnessCommittee.length ; i++){
-            if(witnesses[witnessCommittee[i]].balance > 0){
-                withdrawnAll = false;
-                break;
-            }
-        }
-        
-        require(withdrawnAll);
+        for(uint i = 0 ; i < witnessCommittee.length ; i++)
+            require(witnesses[witnessCommittee[i]].balance == 0);
         
         _;
     }
@@ -427,68 +457,70 @@ contract CloudSLA {
     }
     
     ////the unit is Szabo = 0.001 finney
-    function setCompensationFee(uint _cs)
+    function setCompensationFee(uint _compensationFee)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        require(_cs > 0);
+        require(_compensationFee > 0);
         uint oneUnit = 1 szabo;
-        CompensationFee = _cs*oneUnit;
+        CompensationFee = _compensationFee*oneUnit;
     }
     
-    function setServiceFee(uint _ss)
+    function setServiceFee(uint _serviceFee)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        require(_ss > 0);
+        require(_serviceFee > 0);
         uint oneUnit = 1 szabo;
-        ServiceFee = _ss*oneUnit;
+        ServiceFee = _serviceFee*oneUnit;
     }
     
-    function setWitnessFee(uint _ws)
+    function setWitnessFee(uint _witnessFee)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        require(_ws > 0);
+        require(_witnessFee > 0);
         uint oneUnit = 1 szabo;
-        WF4NoViolation = _ws*oneUnit;
+        WF4NoViolation = _witnessFee*oneUnit;
+        VoteFee = WF4NoViolation;
     }
     
     //the unit is minutes
-    function setServiceDuration(uint _sd)
+    function setServiceDuration(uint _serviceDuration)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        require(_sd > 0);
+        require(_serviceDuration > 0);
         uint oneUnit = 1 minutes;
-        ServiceDuration = _sd*oneUnit;
+        ServiceDuration = _serviceDuration*oneUnit;
     }
     
     //Set the witness committee number, which is the 'N'
-    function setWitnessCommNum(uint _wn)
+    function setWitnessCommNum(uint _witnessCommNum)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        require(_wn > 2);
-        WitnessNumber = _wn;
+        require(_witnessCommNum > 2);
+        require(_witnessCommNum > witnessCommittee.length);
+        WitnessNumber = _witnessCommNum;
     }
     
     //Set the 'M' out of 'N' to confirm the violation
-    function setConfirmNum(uint _m)
+    function setConfirmNum(uint _confirmNum)
         public 
         checkState(State.Fresh) 
         checkProvider
     {
         //// N/2 < M < N 
-        require(_m > (WitnessNumber/2));
-        require(_m < WitnessNumber);
+        require(_confirmNum > (WitnessNumber/2));
+        require(_confirmNum < WitnessNumber);
         
-        ConfirmNumber = _m;
+        ConfirmNumRequired = _confirmNum;
     }
     
     //Set the customer address
@@ -501,12 +533,12 @@ contract CloudSLA {
     }
     
      //// this is for Cloud provider to publish its service detail
-    function publishService(string _detail) 
+    function publishService(string _serviceDetail) 
         public 
         checkState(State.Fresh) 
         checkProvider
     {
-        cloudServiceDetail = _detail;
+        cloudServiceDetail = _serviceDetail;
     }
     
     //// this is for Cloud provider to set up this SLA and wait for Customer to accept
@@ -519,7 +551,7 @@ contract CloudSLA {
     {
         require(WitnessNumber == witnessCommittee.length);
         
-        ProviderBalance = msg.value;
+        ProviderBalance += msg.value;
         SLAState = State.Init;
         AcceptTimeEnd = now + AcceptTimeWin;
         emit SLAStateModified(msg.sender, now, State.Init);
@@ -531,11 +563,13 @@ contract CloudSLA {
         checkProvider
         checkTimeOut(AcceptTimeEnd)
     {
-        if(ProviderBalance > 0)
+        if(ProviderBalance > 0){
             msg.sender.transfer(ProviderBalance);
+            ProviderBalance = 0;
+        }
         
         SLAState = State.Fresh;
-        ProviderBalance = 0;
+        
     }
     
     //// this is for customer to put its prepaid fee and accept the SLA
@@ -549,7 +583,7 @@ contract CloudSLA {
     {
         require(WitnessNumber == witnessCommittee.length);
         
-        CustomerBalance = msg.value;
+        CustomerBalance += msg.value;
         SLAState = State.Active;
         emit SLAStateModified(msg.sender, now, State.Active);
         ServiceEnd = now + ServiceDuration;
@@ -561,7 +595,7 @@ contract CloudSLA {
         ///setup the SharedBalance
         ProviderBalance -= SharedFee;
         CustomerBalance -= SharedFee;
-        SharedBalance = SharedFee*2;
+        SharedBalance += SharedFee*2;
     }
     
     /**
@@ -575,20 +609,23 @@ contract CloudSLA {
         checkTimeIn(ServiceEnd)
     {
         ////some witness has reported the violation
-        require(ConfirmTimeBegin != 0);
+        require(ReportTimeBegin != 0);
         
         ////some witness reported, but the violation is not confirmed 
-        require(now > ConfirmTimeBegin + ConfirmTimeWin);
+        require(now > ReportTimeBegin + ReportTimeWin);
         
-        ConfirmRepCount = 0;
-        ConfirmTimeBegin = 0;
+        
         for(uint i = 0 ; i < witnessCommittee.length ; i++){
             if(witnesses[witnessCommittee[i]].violated == true){
                 witnesses[witnessCommittee[i]].violated = false;
                 SharedBalance += witnesses[witnessCommittee[i]].balance;    ///penalty
                 witnesses[witnessCommittee[i]].balance = 0;
+                wp.reputationDecrease(witnessCommittee[i], 1);  ////the reputation value of this witness decreases by 1
             }
         }
+        
+        ConfirmRepCount = 0;
+        ReportTimeBegin = 0;
         
     }
     
@@ -596,36 +633,34 @@ contract CloudSLA {
     function reportViolation()
         public
         payable
-        checkState(State.Active) 
         checkTimeIn(ServiceEnd)
-        checkWitness
+        checkWitness 
         checkMoney(VoteFee)
     {
         uint equalOp = 0;   /////nonsense operation to make every one using the same gas 
         
-        if(ConfirmTimeBegin == 0)
-            ConfirmTimeBegin = now;
+        if(ReportTimeBegin == 0)
+            ReportTimeBegin = now;
         else
-            equalOp = now;    
-        
+            equalOp = now; 
+            
         ////only valid within the confirmation time window
-        require(now < ConfirmTimeBegin + ConfirmTimeWin);
+        require(now < ReportTimeBegin + ReportTimeWin);
+        
+        require( SLAState == State.Violated || SLAState == State.Active );
         
         /////one witness cannot vote twice 
-        require(witnesses[msg.sender].violated == false);
+        require(!witnesses[msg.sender].violated);
         
         witnesses[msg.sender].violated = true;
-        witnesses[msg.sender].balance = VoteFee;
+        witnesses[msg.sender].balance += VoteFee;
         
-        ConfirmRepCount += 1;
+        ConfirmRepCount++;
         
-        if(ConfirmRepCount >= ConfirmNumber){
+        ////the witness who reports in the last order pay more gas as penalty
+        if( ConfirmRepCount >= ConfirmNumRequired ){
             SLAState = State.Violated;
             emit SLAStateModified(msg.sender, now, State.Violated);
-        }
-        else{
-            equalOp = now;
-            equalOp = now;
         }
         
         emit SLAViolationRep(msg.sender, now, ServiceEnd);
@@ -635,13 +670,22 @@ contract CloudSLA {
     function customerEndVSLAandWithdraw()
         public
         checkState(State.Violated) 
-        checkTimeOut(ServiceEnd)
         checkCustomer
     {
+        /////end the Service 
+        ServiceEnd = now;
+        ////end the violation reports
+        if(now < ReportTimeBegin + ReportTimeWin)
+            ReportTimeBegin = now - ReportTimeWin;
+         
         for(uint i = 0 ; i < witnessCommittee.length ; i++){
             if(witnesses[witnessCommittee[i]].violated == true){
-                witnesses[witnessCommittee[i]].balance += WF4Violation;  ///reward the witness who report this violation
+                witnesses[witnessCommittee[i]].balance += WF4Violation;  ///reward the witness who reported this violation
                 SharedBalance -= WF4Violation;
+            }else{
+                wp.reputationDecrease(witnessCommittee[i], 1);  ////the reputation value of this witness decreases by 1
+                //witnesses[witnessCommittee[i]].balance += WF4NoViolation;  
+                //SharedBalance -= WF4NoViolation;
             }
         }
         
@@ -656,13 +700,15 @@ contract CloudSLA {
         }
         SharedBalance = 0;
         
+        
         SLAState = State.Completed;
         emit SLAStateModified(msg.sender, now, State.Completed);
         
-        if(CustomerBalance > 0)
+        if(CustomerBalance > 0){
             msg.sender.transfer(CustomerBalance);
+            CustomerBalance = 0;
+        }
         
-        CustomerBalance = 0;
     }
     
     function customerWithdraw()
@@ -671,8 +717,9 @@ contract CloudSLA {
         checkTimeOut(ServiceEnd)
         checkCustomer
     {
-        if(CustomerBalance > 0)
-            msg.sender.transfer(CustomerBalance);
+        require(CustomerBalance > 0);
+        
+        msg.sender.transfer(CustomerBalance);
             
         CustomerBalance = 0;
     }
@@ -683,8 +730,9 @@ contract CloudSLA {
         checkTimeOut(ServiceEnd)
         checkProvider
     {
-        if(ProviderBalance > 0)
-            msg.sender.transfer(ProviderBalance);
+        require(ProviderBalance > 0);
+        
+        msg.sender.transfer(ProviderBalance);
         
         ProviderBalance = 0;
     }
@@ -699,12 +747,14 @@ contract CloudSLA {
     {
         for(uint i = 0 ; i < witnessCommittee.length ; i++){
             if(witnesses[witnessCommittee[i]].violated == true){
+                SharedBalance += witnesses[witnessCommittee[i]].balance;   ////penalty for the reported witness, might be cheating
                 witnesses[witnessCommittee[i]].balance = 0;
-                SharedBalance += VoteFee;   ////penalty for the reported witness, might be cheating
+                wp.reputationDecrease(witnessCommittee[i], 1);  ////the reputation value of this witness decreases by 1
             }else{
-                witnesses[witnessCommittee[i]].balance = WF4NoViolation;   /// reward the normal witness
+                witnesses[witnessCommittee[i]].balance += WF4NoViolation;       /// reward the witness
                 SharedBalance -= WF4NoViolation;
             }
+            
         }
         
         /// customer and provider divide the remaining shared balance
@@ -717,10 +767,12 @@ contract CloudSLA {
         SLAState = State.Completed;
         emit SLAStateModified(msg.sender, now, State.Completed);
         
-        if(ProviderBalance > 0)
+        if(ProviderBalance > 0){
             msg.sender.transfer(ProviderBalance);
+            ProviderBalance = 0;
+        }
             
-        ProviderBalance = 0;
+        
     }
     
     function witnessWithdraw()
@@ -750,13 +802,9 @@ contract CloudSLA {
     {
         require(WitnessNumber == witnessCommittee.length);
         
-        //// in case there are some unexpected errors happen, provider can withdraw all the money back anyway
-        if(address(this).balance > 0)
-            msg.sender.transfer(address(this).balance);
-        
         /// reset all the related values
         ConfirmRepCount = 0;
-        ConfirmTimeBegin = 0;
+        ReportTimeBegin = 0;
         
         ///reset the witnesses' state only
         for(uint i = 0 ; i < witnessCommittee.length ; i++){
@@ -785,11 +833,13 @@ contract CloudSLA {
         
         /// reset all the related values
         ConfirmRepCount = 0;
-        ConfirmTimeBegin = 0;
+        ReportTimeBegin = 0;
         
         ///reset the witness committee
-        for(uint i = 0 ; i < witnessCommittee.length ; i++)
+        for(uint i = 0 ; i < witnessCommittee.length ; i++){
+            wp.release(witnessCommittee[i]);
             delete witnesses[witnessCommittee[i]];
+        }
         
         delete witnessCommittee;
         
@@ -828,7 +878,7 @@ contract CloudSLA {
         return true;
     }
     
-    function sotitionFromWP(uint _N)
+    function sortitionFromWP(uint _N)
         public
         checkProvider
         returns
@@ -886,7 +936,8 @@ contract CloudSLA {
         require(SLAState != State.Active);
         require(SLAState != State.Violated);
         
-        require(SLAState == State.Init && now > AcceptTimeEnd);
+        require( (SLAState == State.Init && now > AcceptTimeEnd) 
+                 || SLAState == State.Completed );
         
         
         uint index = witnessCommittee.length;
