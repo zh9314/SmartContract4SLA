@@ -6,7 +6,3 @@ The source code is in the file "SmartContracts4SLA.sol" of this repository. It c
 
 - "CloudSLAInterfaces.json" is the description file of the specific SLA smart contract interfaces.   
 
-For the detailed model design and implementation, you can check reports as follows.
-
-- [Model design and proof; Implementation and experimental study](https://zh9314.github.io/files/publications/reports/sc4slaReports.pdf)
-- [Experimental reports only on SLA smart contract (without witness-pool smart contract)](https://zh9314.github.io/files/publications/reports/SLASmartContractReport.pdf)
